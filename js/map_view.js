@@ -1,3 +1,4 @@
+
 // map_view.js: Interactive Map with Custom Time Selection
 
 window.renderMapView = function (containerId) {
@@ -23,7 +24,7 @@ window.renderMapView = function (containerId) {
         return;
     }
 
-    // Main Layout: Header + Custom Time Input + Map
+    // Main Layout: Header + Custom Time Input + Map + Manual CSV Import
     container.innerHTML = `
         <div class="card">
             <div style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:15px; margin-bottom:15px;">
@@ -39,6 +40,18 @@ window.renderMapView = function (containerId) {
                 </div>
             </div>
 
+            <div style="margin-bottom:12px; padding:10px; border-radius:6px; background: rgba(255,255,255,0.02);">
+                <div style="font-weight:600; margin-bottom:6px;">Manual CSV Import (paste 1 or more rows)</div>
+                <div style="display:flex; gap:8px; align-items:flex-start;">
+                    <textarea id="csvInput" placeholder="Paste CSV rows here (35 columns)" style="flex:1; min-height:56px; background:#071127; color:#e6eef8; padding:8px; border-radius:6px; border:1px solid #253244;"></textarea>
+                    <div style="display:flex; flex-direction:column; gap:8px;">
+                        <button id="csvAddBtn" style="padding:8px 12px; border-radius:6px; background:#0ea5e9; border:none; color:#021124; cursor:pointer;">Preview Rows</button>
+                        <button id="csvClearBtn" style="padding:8px 12px; border-radius:6px; background:#94a3b8; border:none; color:#021124; cursor:pointer;">Clear</button>
+                    </div>
+                </div>
+                <div style="font-size:0.8rem; opacity:0.7; margin-top:6px;">Rows with <strong>N/A</strong> are treated as missing values. Only GPS lat/lng/speed and timestamp are used for map preview.</div>
+            </div>
+
             <div id="map" style="height: 500px; width: 100%; border-radius: 8px; margin-top: 15px;"></div>
             
             <div id="map-stats" style="margin-top: 15px; padding: 15px; background: rgba(255,255,255,0.05); border-radius: 8px;">
@@ -50,6 +63,73 @@ window.renderMapView = function (containerId) {
     // Initialize Controller
     initMapController(carFile);
 };
+
+// Manual data buffer for preview/import
+window.manualTelemetryBuffer = [];
+
+// Parse one CSV telemetry line (35 columns) into the minimal map object
+function parseTelemetryCSVLine(line) {
+    const cols = line.split(',').map(s => s.trim());
+    if (cols.length < 35) return { error: `Expected 35 columns, got ${cols.length}` };
+
+    const date = cols[0]; // DD/MM/YYYY
+    const time = cols[1]; // HH:MM:SS
+    const lat = cols[2] === 'N/A' ? null : parseFloat(cols[2]);
+    const lon = cols[3] === 'N/A' ? null : parseFloat(cols[3]);
+    const speed = cols[4] === 'N/A' ? 0 : parseFloat(cols[4]);
+
+    const timestamp = `${date} ${time}`;
+
+    if (lat == null || lon == null) return { error: 'Missing GPS lat/lng' };
+
+    return {
+        timestamp: timestamp,
+        latitude: lat,
+        longitude: lon,
+        speed_kmph: isNaN(speed) ? 0 : speed
+    };
+}
+
+function handleManualCSVAdd() {
+    const ta = document.getElementById('csvInput');
+    const statsEl = document.getElementById('map-stats');
+    if (!ta) return;
+    const raw = ta.value.trim();
+    if (!raw) {
+        statsEl.innerHTML = '<span style="color:#f59e0b">No rows to import.</span>';
+        return;
+    }
+
+    const lines = raw.split(/\r?\n/).map(l => l.trim()).filter(Boolean);
+    const parsed = [];
+    const errors = [];
+    for (const ln of lines) {
+        const p = parseTelemetryCSVLine(ln);
+        if (p.error) errors.push(`${ln} -> ${p.error}`);
+        else parsed.push(p);
+    }
+
+    if (errors.length) {
+        statsEl.innerHTML = `<div style="color:#ef4444">Parse errors:<br>${errors.join('<br>')}</div>`;
+        return;
+    }
+
+    // Sort by timestamp (simple lexicographic works for DD/MM/YYYY HH:MM:SS if format consistent)
+    parsed.sort((a, b) => a.timestamp.localeCompare(b.timestamp));
+    window.manualTelemetryBuffer = parsed;
+    renderMapData(parsed, statsEl);
+}
+
+function handleManualCSVClear() {
+    document.getElementById('csvInput').value = '';
+    window.manualTelemetryBuffer = [];
+    const statsEl = document.getElementById('map-stats');
+    if (statsEl) statsEl.innerHTML = 'Manual buffer cleared.';
+    if (window.currentMap) {
+        window.currentMap.remove();
+        window.currentMap = null;
+    }
+}
 
 async function initMapController(carFile) {
     const API_BASE = window.getApiBase();
@@ -79,10 +159,8 @@ async function initMapController(carFile) {
         picker.min = minIso;
         picker.max = maxIso;
 
-        // 3. Set Default Value (Latest time - 1 hour)
-        const maxDate = new Date(meta.max_timestamp);
-        maxDate.setHours(maxDate.getHours() - 1);
-        const defaultStart = dateToLocalISO(maxDate); // Helper to get correct local time string
+        // 3. Set Default Value (Earliest time)
+        const defaultStart = meta.min_timestamp.replace(' ', 'T').slice(0, 16);
         picker.value = defaultStart;
 
         // 4. Bind Listener

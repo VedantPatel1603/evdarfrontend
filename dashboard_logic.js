@@ -3,6 +3,12 @@ let allRows = [];
 let speedChart = null;
 let accelChart = null;
 
+// --- CAN Data Variables (NEW) ---
+let canRows = [];
+let rpmChart = null;
+let coolantChart = null;
+let throttleChart = null;
+
 // Helpers
 async function loadCSV(file) {
     const res = await fetch("data/" + file);
@@ -166,10 +172,183 @@ if (btnApplyTime) {
         const diffHrs = (end - start) / (1000 * 60 * 60);
         if (diffHrs > 1.0) { alert("Viewing window cannot exceed 1 hour."); return; }
         filterAndRender(start, end);
+
+        // Re-fetch CAN data for the same time window (NEW)
+        const user = window.getUser ? window.getUser() : null;
+        if (user && user.car) {
+            const startParam = timeStartEl.value.replace("T", " ") + ":00";
+            loadCanData(user.car, startParam);
+        }
     });
 }
 
-// Main Load Function
+// ─── CAN DATA (NEW) ────────────────────────────────────────────────────────────
+
+// Build the backend base URL the same way login.js does
+function getBackendURL() {
+    // If config.js exposes a global, use it; otherwise fall back to same origin
+    if (window.API_BASE) return window.API_BASE;
+    if (window.NGROK_BACKEND_URL) return window.NGROK_BACKEND_URL;
+    return window.location.origin;
+}
+
+async function loadCanData(carFile, startTime) {
+    try {
+        const base = getBackendURL();
+        let url = `${base}/api/can-data/${carFile}`;
+        if (startTime) url += `?start_time=${encodeURIComponent(startTime)}`;
+
+        const res = await fetch(url);
+        if (!res.ok) {
+            console.warn("CAN data not available:", res.status, await res.text());
+            return;
+        }
+        canRows = await res.json();
+        if (!Array.isArray(canRows) || canRows.length === 0) {
+            console.warn("CAN data returned empty array");
+            return;
+        }
+        updateRpmChart(canRows);
+        updateCoolantChart(canRows);
+        updateThrottleChart(canRows);
+        renderCanTable(canRows);
+    } catch (e) {
+        console.error("Failed to load CAN data", e);
+    }
+}
+
+function downsampleCan(rows) {
+    return rows.length > 500 ? rows.filter((_, i) => i % Math.ceil(rows.length / 500) === 0) : rows;
+}
+
+function updateRpmChart(rows) {
+    const d = downsampleCan(rows);
+    if (rpmChart) rpmChart.destroy();
+    const ctx = document.getElementById("rpmChart");
+    if (!ctx) return;
+    rpmChart = new Chart(ctx, {
+        type: "line",
+        data: {
+            labels: d.map(r => r.timestamp.slice(11)),
+            datasets: [{
+                label: "Engine RPM",
+                data: d.map(r => r.engine_rpm),
+                borderColor: "#f59e0b",
+                borderWidth: 2,
+                pointRadius: 0,
+                fill: false
+            }]
+        },
+        options: {
+            responsive: true,
+            maintainAspectRatio: false,
+            interaction: { mode: 'index', intersect: false },
+            plugins: { legend: { position: 'top' } }
+        }
+    });
+}
+
+function updateCoolantChart(rows) {
+    const d = downsampleCan(rows);
+    if (coolantChart) coolantChart.destroy();
+    const ctx = document.getElementById("coolantChart");
+    if (!ctx) return;
+    coolantChart = new Chart(ctx, {
+        type: "line",
+        data: {
+            labels: d.map(r => r.timestamp.slice(11)),
+            datasets: [
+                {
+                    label: "Coolant Temp (°C)",
+                    data: d.map(r => r.coolant_temp),
+                    borderColor: "#ef4444",
+                    borderWidth: 2,
+                    pointRadius: 0,
+                    fill: false
+                },
+                {
+                    label: "Engine Load (%)",
+                    data: d.map(r => r.engine_load),
+                    borderColor: "#8b5cf6",
+                    borderWidth: 1.5,
+                    pointRadius: 0,
+                    fill: false
+                }
+            ]
+        },
+        options: {
+            responsive: true,
+            maintainAspectRatio: false,
+            interaction: { mode: 'index', intersect: false },
+            plugins: { legend: { position: 'top' } }
+        }
+    });
+}
+
+function updateThrottleChart(rows) {
+    const d = downsampleCan(rows);
+    if (throttleChart) throttleChart.destroy();
+    const ctx = document.getElementById("throttleChart");
+    if (!ctx) return;
+    throttleChart = new Chart(ctx, {
+        type: "line",
+        data: {
+            labels: d.map(r => r.timestamp.slice(11)),
+            datasets: [
+                {
+                    label: "Throttle Pos (%)",
+                    data: d.map(r => r.throttle_pos),
+                    borderColor: "#22c55e",
+                    borderWidth: 2,
+                    pointRadius: 0,
+                    fill: false
+                },
+                {
+                    label: "Vehicle Speed (km/h)",
+                    data: d.map(r => r.vehicle_speed),
+                    borderColor: "#38bdf8",
+                    borderWidth: 1.5,
+                    pointRadius: 0,
+                    fill: false
+                }
+            ]
+        },
+        options: {
+            responsive: true,
+            maintainAspectRatio: false,
+            interaction: { mode: 'index', intersect: false },
+            plugins: { legend: { position: 'top' } }
+        }
+    });
+}
+
+function renderCanTable(rows) {
+    const tbl = document.getElementById("canTable");
+    if (!tbl) return;
+    tbl.innerHTML = `<tr>
+        <th>Time</th><th>RPM</th><th>Speed (km/h)</th>
+        <th>Coolant (°C)</th><th>Throttle (%)</th>
+        <th>Engine Load (%)</th><th>Fuel Pressure</th>
+        <th>Intake MAP</th><th>MAF Rate</th>
+    </tr>`;
+    rows.forEach(r => {
+        const row = tbl.insertRow();
+        row.insertCell().innerText = r.timestamp;
+        row.insertCell().innerText = r.engine_rpm ?? "-";
+        row.insertCell().innerText = r.vehicle_speed ?? "-";
+        const ct = row.insertCell();
+        ct.innerText = r.coolant_temp ?? "-";
+        if (r.coolant_temp > 100) ct.style.color = "#ef4444";
+        row.insertCell().innerText = r.throttle_pos ?? "-";
+        row.insertCell().innerText = r.engine_load ?? "-";
+        row.insertCell().innerText = r.fuel_pressure ?? "-";
+        row.insertCell().innerText = r.intake_map ?? "-";
+        row.insertCell().innerText = r.maf_rate ?? "-";
+    });
+}
+
+// ─── Main Load Function ────────────────────────────────────────────────────────
+
 async function loadClientCSV(file) {
     try {
         const csv = await loadCSV(file);
@@ -182,15 +361,27 @@ async function loadClientCSV(file) {
 
         if (allRows.length === 0) return;
 
+        const firstRow = allRows[0];
         const lastRow = allRows[allRows.length - 1];
-        const lastTime = new Date(lastRow.timestamp.replace(" ", "T"));
-        const startTime = new Date(lastTime);
-        startTime.setHours(startTime.getHours() - 1);
 
-        if (timeStartEl) timeStartEl.value = toDatetimeLocal(startTime);
-        if (timeEndEl) timeEndEl.value = toDatetimeLocal(lastTime);
+        // Use raw timestamp from backend directly
+        const startStr = firstRow.timestamp.replace(" ", "T").slice(0, 16);
+        const lastStr = lastRow.timestamp.replace(" ", "T").slice(0, 16);
+
+        if (timeStartEl) timeStartEl.value = startStr;
+        if (timeEndEl) timeEndEl.value = lastStr;
+
+        // Still pass Date objects to filterAndRender if it needs them
+        const startTime = new Date(startStr);
+        const lastTime = new Date(lastStr);
 
         filterAndRender(startTime, lastTime);
+
+        // --- Load CAN data for same car & time window (NEW) ---
+        // file = "car1.csv", we pass it directly to /api/can-data/
+        const canStartParam = firstRow.timestamp; // "YYYY-MM-DD HH:MM:SS"
+        loadCanData(file, canStartParam);
+
     } catch (e) {
         console.error("Failed to load CSV", e);
     }
@@ -198,3 +389,4 @@ async function loadClientCSV(file) {
 
 // Expose
 window.loadClientCSV = loadClientCSV;
+window.loadCanData = loadCanData;

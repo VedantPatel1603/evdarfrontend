@@ -60,6 +60,8 @@ window.renderView = function (view) {
     // Route to Modules
     if (view === 'overview') {
         window.renderOverview(containerId, window.getUser());
+    } else if (view === 'data-export') {
+        window.renderDataExportView(containerId);
     } else if (view === 'admin') {
         window.renderAdminView(containerId, window.getUser());
     } else {
